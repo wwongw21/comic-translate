@@ -21,6 +21,7 @@ uv.lock
 # Test files
 test_*.py
 !tests/test_project_autosave.py
+!tests/test_runtime_repairs.py
 demo_*.py
 benchmarks/
 

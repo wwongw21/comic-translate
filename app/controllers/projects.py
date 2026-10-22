@@ -840,16 +840,15 @@ class ProjectController:
         return candidate
 
     @staticmethod
-    def _build_export_page_name(page_number: int, file_path: str) -> str:
-        # Use the original filename directly
+    def _build_export_page_name(page_number: int, file_path: str, ordinal_width: int = 4) -> str:
         basename = os.path.basename(file_path)
-        # Sanitize the filename to remove any problematic characters
         stem = os.path.splitext(basename)[0]
         ext = os.path.splitext(basename)[1].lower() or ".png"
         stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
         if not stem:
-            stem = f"page_{page_number:04d}"
-        return f"{stem}{ext}"
+            stem = "page"
+        ordinal_width = max(4, int(ordinal_width))
+        return f"{page_number:0{ordinal_width}d}_{stem}{ext}"
 
     def _build_export_plan(self, output_path: str, chapter_names_by_path: dict[str, str]) -> list[dict]:
         extension = os.path.splitext(output_path)[1] or ".zip"
@@ -916,6 +915,7 @@ class ProjectController:
             for group_index, group in enumerate(export_plan, start=1):
                 group_dir = os.path.join(temp_dir, f"group_{group_index:03d}")
                 os.makedirs(group_dir, exist_ok=True)
+                ordinal_width = max(4, len(str(max(1, len(group["page_indices"])))))
                 for page_number, page_idx in enumerate(group["page_indices"], start=1):
                     file_path = self.main.image_files[page_idx]
                     
@@ -936,7 +936,10 @@ class ProjectController:
                     else:
                         renderer.add_state_to_image(viewer_state)
 
-                    sv_pth = os.path.join(group_dir, self._build_export_page_name(page_number, file_path))
+                    sv_pth = os.path.join(
+                        group_dir,
+                        self._build_export_page_name(page_number, file_path, ordinal_width),
+                    )
                     renderer.save_image(sv_pth)
 
                 os.makedirs(os.path.dirname(group["output_path"]) or ".", exist_ok=True)

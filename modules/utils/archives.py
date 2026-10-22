@@ -434,7 +434,8 @@ def make_cbz(input_dir, output_path='', output_dir='', output_base_name='', save
     
     with zipfile.ZipFile(output_path, 'w') as archive:
         for root, dirs, files in os.walk(input_dir):
-            for file in files:
+            dirs.sort(key=natural_sort_key)
+            for file in sorted(files, key=natural_sort_key):
                 if is_image_file(file):
                     file_path = os.path.join(root, file)
                     archive.write(file_path, arcname=os.path.relpath(file_path, input_dir))
@@ -446,7 +447,8 @@ def make_cb7(input_dir, output_path="", output_dir="", output_base_name=""):
     import py7zr
     with py7zr.SevenZipFile(output_path, 'w') as archive:
         for root, dirs, files in os.walk(input_dir):
-            for file in files:
+            dirs.sort(key=natural_sort_key)
+            for file in sorted(files, key=natural_sort_key):
                 if is_image_file(file):
                     file_path = os.path.join(root, file)
                     archive.write(file_path, arcname=os.path.relpath(file_path, input_dir))
