@@ -1,0 +1,1013 @@
+{
+  "repo": "comic-translate",
+  "sha": "010048b358cd11e625fedb4d5843b37fa6368e12",
+  "scope": "Read-only review of default-branch HEAD: worker/task lifecycle, autosave/project container, file and archive import/export, translation/OCR orchestration, dependency declarations and CI.",
+  "findings": [
+    {
+      "id": "COMIC-1",
+      "severity": "High",
+      "title": "Failed autosave deletes recovery and marks the project saved",
+      "location": "app/controllers/projects.py",
+      "lines": "417-424; same pattern 340-350",
+      "evidence": "GenericWorker.run emits error on exception then always emits finished (app/thread_worker.py:33-37). autosave_project.on_error logs failure but does not preserve a failure flag; on_finished clears the recovery checkpoint and calls set_project_clean whenever the revision is unchanged. Per-page batch autosave duplicates this behavior.",
+      "impact": "A disk-full/permission/serialization failure can leave edits unsaved while removing the recovery copy and suppressing the close-time unsaved-changes prompt. The normal autosave completion path then sees a clean project and schedules no retry. Scope: regular-project or batch autosave; a new edit while saving preserves dirty state and triggers retry, but still deletes recovery. Recovery-only autosave is unaffected. Previously committed project data may survive.",
+      "recommendation": "Track explicit save success/failure and perform recovery deletion/clean-state updates only on success in both autosave paths; keep dirty state and recovery on failure and surface a retryable error.",
+      "validation": "Executed production autosave_project method with minimal UI collaborator stubs. Called its error then finished callbacks in the order guaranteed by GenericWorker; observed recovery deleted and marked clean, with no retry. Full Qt/disk-full UI session not run. Independent second reviewer also used actual worker, task runner and dirty-state methods, a real temporary recovery file and injected ENOSPC; observed dirty=false, recovery_exists=false, retry=false.",
+      "file": "app/controllers/projects.py",
+      "classification": "Confirmed through the validation described below",
+      "disposition": "Act on",
+      "source_sha": "010048b358cd11e625fedb4d5843b37fa6368e12",
+      "source_url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/projects.py#L417"
+    },
+    {
+      "id": "COMIC-2",
+      "severity": "Medium",
+      "title": "One failed queue operation starts two following operations together",
+      "location": "app/controllers/task_runner.py",
+      "lines": "69-77",
+      "evidence": "Both enhanced_error_callback and enhanced_finished_callback schedule _process_next_operation. GenericWorker emits both error and finished for a failed callback, so two pending operations are popped and submitted to the threadpool before either has completed.",
+      "impact": "The serialization guarantee breaks after an ordinary file/model/network error. Image loads, project saves, and processing jobs can then share mutable state concurrently, and current_worker tracks only the most recently started job.",
+      "recommendation": "Advance the queue exactly once, normally from finished; let error only report the failure. Ensure cancellation does not reset processing state until the active worker actually completes.",
+      "validation": "Ran the real GenericWorker and TaskRunnerController classes using deterministic Signal/QTimer shims. Enqueued failing A followed by B and C; after processing A error/finished callbacks, B and C were both submitted while neither had run. Qt event-loop integration not run.",
+      "file": "app/controllers/task_runner.py",
+      "classification": "Confirmed through the validation described below",
+      "disposition": "Act on",
+      "source_sha": "010048b358cd11e625fedb4d5843b37fa6368e12",
+      "source_url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/task_runner.py#L69"
+    },
+    {
+      "id": "COMIC-3",
+      "severity": "Medium",
+      "title": "Distinct page filenames collide during export and silently lose pages",
+      "location": "app/controllers/projects.py",
+      "lines": "827-836; 923-924",
+      "evidence": "_build_export_page_name sanitizes all non-ASCII or special characters but ignores page_number unless the resulting stem is empty. a b.png and a?b.png both map to a_b.png. save_and_make_worker saves them into the same group directory without collision detection, overwriting the first page before make() packs the directory.",
+      "impact": "The generated archive/PDF silently omits pages. Distinct original basenames also bypass the duplicate-basename partition prompt, so this affects ordinary international/special-character filenames even when originals are unique.",
+      "recommendation": "Generate unique ordered names within every export group, for example prefix each sanitized filename with its page_number; preserve every page regardless of basename or case collisions.",
+      "validation": "Executed the real export naming and save_and_make_worker methods with a minimal file-writing renderer. Two distinct input pages produced only one a_b.png containing the second page at archive creation time.",
+      "file": "app/controllers/projects.py",
+      "classification": "Confirmed through the validation described below",
+      "disposition": "Act on",
+      "source_sha": "010048b358cd11e625fedb4d5843b37fa6368e12",
+      "source_url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/projects.py#L827"
+    },
+    {
+      "id": "COMIC-4",
+      "severity": "Medium",
+      "title": "The only macOS packaging workflow references files absent from the repository",
+      "location": ".github/workflows/build-macos-dmg.yml",
+      "lines": "32-37",
+      "evidence": "The workflow runs pyinstaller ct-mac.spec and chmod +x builddmg.sh / ./builddmg.sh, but neither ct-mac.spec nor builddmg.sh exists in the pinned checkout or git ls-files. There is no preceding step generating either.",
+      "impact": "The workflow cannot produce the advertised macOS DMG from a clean checkout, regardless of dependency installation success.",
+      "recommendation": "Check in the intended PyInstaller spec and DMG build script or change workflow commands to a complete checked-in build entry point; validate one clean macOS Actions run.",
+      "validation": "Confirmed both files absent via filesystem checks and git ls-files; inspected full workflow. GitHub Actions/macOS build not executed.",
+      "file": ".github/workflows/build-macos-dmg.yml",
+      "classification": "Confirmed through the validation described below",
+      "disposition": "Act on",
+      "source_sha": "010048b358cd11e625fedb4d5843b37fa6368e12",
+      "source_url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/.github/workflows/build-macos-dmg.yml#L32"
+    }
+  ],
+  "tests": [
+    {
+      "command": "python /workspace/review/comic_repro.py",
+      "result": "PASS: four focused source-level reproductions assert the observed failure modes; also compiled all 285 Python files in memory."
+    },
+    {
+      "command": "git status --short",
+      "result": "Clean checkout before final evidence write (evidence is outside repo)."
+    },
+    {
+      "command": "git ls-files *test*",
+      "result": "No tests found; no test directory present."
+    }
+  ],
+  "limitations": [
+    "No PySide6 installed, so no real GUI session or Qt event loop was exercised. Signal/timer behavior in the queue reproduction uses small deterministic shims.",
+    "No model downloads, OCR/inpainting inference, paid translation calls, GPU checks, macOS packaging, or live upstream services were run.",
+    "No dependency vulnerability database scan was run. Dependency requirements are unpinned minimum bounds with no lockfile; reproducibility was reviewed statically.",
+    "This is broad repository review, not an exhaustive line-by-line audit or formal security scan."
+  ],
+  "artifact": "/workspace/review/comic_repro.py",
+  "name": "comic-translate",
+  "branch": "main",
+  "coverage": "Read-only review of default-branch HEAD: worker/task lifecycle, autosave/project container, file and archive import/export, translation/OCR orchestration, dependency declarations and CI.",
+  "evidence_file": "report.json",
+  "ci_observation": {
+    "repo": "comic-translate",
+    "total_count": 0,
+    "runs": []
+  },
+  "inventory": {
+    "repo": "comic-translate",
+    "sha": "010048b358cd11e625fedb4d5843b37fa6368e12",
+    "files": 473,
+    "source_exts": [
+      [
+        ".py",
+        285
+      ],
+      [
+        ".svg",
+        118
+      ],
+      [
+        ".png",
+        30
+      ],
+      [
+        ".qm",
+        9
+      ],
+      [
+        ".ts",
+        9
+      ],
+      [
+        "",
+        7
+      ],
+      [
+        ".md",
+        4
+      ]
+    ],
+    "tests": 0,
+    "ci": [
+      ".github/workflows/build-macos-dmg.yml"
+    ]
+  },
+  "handoff": {
+    "repo": "comic-translate",
+    "repository_url": "https://github.com/wwongw21/comic-translate",
+    "reviewed_commit": "010048b358cd11e625fedb4d5843b37fa6368e12",
+    "review_type": "Read-only engineering review and proposed repair handoff",
+    "audience": [
+      "Maintainer implementing the repairs",
+      "Reviewer validating save/export contracts",
+      "Release engineer producing the macOS application"
+    ],
+    "outcome": "Protect unsaved comic edits and recovery checkpoints, retain queue serialization after failures, preserve every exported page, and restore a buildable macOS packaging path.",
+    "current_status": "All four reviewed defects are OPEN. No repository source or workflow changes were made. Repair and release steps below are proposals, not completed work.",
+    "review_scope": "Read-only review of default-branch HEAD: worker/task lifecycle, autosave/project container, file and archive import/export, translation/OCR orchestration, dependency declarations and CI.",
+    "executive_assessment": {
+      "priority": "Fix COMIC-1 first because an ordinary failed autosave can erase the recovery checkpoint and remove the unsaved-changes warning. Address COMIC-2 next because its failure path breaks the task queue used by saves and processing. COMIC-3 and COMIC-4 are independent repairs.",
+      "confirmed_defects": 4,
+      "highest_severity": "High",
+      "evidence_strength": "Source tracing plus executable control-flow/file-output reproductions. Autosave was independently challenged with real dirty-state methods and a temporary recovery file. No real Qt event-loop session or macOS build was performed.",
+      "not_a_claim": "The review does not establish that a previous SQLite project is always corrupted or that all autosave failures lose data. It demonstrates false saved-state and recovery deletion on the scoped failure path."
+    },
+    "architecture": [
+      {
+        "component": "Desktop startup and shared application state",
+        "files": [
+          "comic.py",
+          "controller.py"
+        ],
+        "responsibility": "comic.py launches the PySide6 application and single-instance/open-project routing. ComicTranslate in controller.py owns page lists, image/history/patch dictionaries, dirty revision, undo group, threadpool and controller instances.",
+        "relevant_contract": "Unsaved-change prompts depend on has_unsaved_changes; set_project_clean clears manual and undo dirty indicators. Worker completions that mark clean therefore affect close behavior.",
+        "sources": [
+          {
+            "path": "controller.py",
+            "lines": [
+              92,
+              139
+            ],
+            "label": "controller.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/controller.py#L92-L139"
+          },
+          {
+            "path": "controller.py",
+            "lines": [
+              373,
+              395
+            ],
+            "label": "controller.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/controller.py#L373-L395"
+          },
+          {
+            "path": "controller.py",
+            "lines": [
+              848,
+              878
+            ],
+            "label": "controller.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/controller.py#L848-L878"
+          }
+        ]
+      },
+      {
+        "component": "Worker execution and serial task queue",
+        "files": [
+          "app/thread_worker.py",
+          "app/controllers/task_runner.py"
+        ],
+        "responsibility": "GenericWorker executes callables/generators in QThreadPool and emits result or error plus an unconditional finished signal. TaskRunnerController queues normal operations and dispatches UI callbacks with QTimer. Immediate operations deliberately bypass the queue.",
+        "relevant_contract": "finished means terminal cleanup, not successful completion. Normal queued work should advance exactly once per operation. Immediate work and per-page batch autosaves are separate concurrency paths.",
+        "sources": [
+          {
+            "path": "app/thread_worker.py",
+            "lines": [
+              19,
+              40
+            ],
+            "label": "app/thread_worker.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/thread_worker.py#L19-L40"
+          },
+          {
+            "path": "app/controllers/task_runner.py",
+            "lines": [
+              61,
+              120
+            ],
+            "label": "app/controllers/task_runner.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/task_runner.py#L61-L120"
+          },
+          {
+            "path": "app/controllers/task_runner.py",
+            "lines": [
+              123,
+              170
+            ],
+            "label": "app/controllers/task_runner.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/task_runner.py#L123-L170"
+          }
+        ]
+      },
+      {
+        "component": "Project save, autosave and recovery orchestration",
+        "files": [
+          "app/controllers/projects.py",
+          "app/projects/project_state.py",
+          "app/projects/project_state_v2.py"
+        ],
+        "responsibility": "ProjectController captures state, launches manual saves, regular/recovery autosaves and direct per-page batch save workers. The project-state writer uses a SQLite container with manifest/page rows and content-addressed image/patch blobs; lazy materialization avoids loading every page immediately.",
+        "relevant_contract": "Only confirmed successful saves may remove recovery or clean an unchanged dirty revision. Manual run_save_proj already has a local failure flag that provides a repository pattern for guarding its finish callback.",
+        "sources": [
+          {
+            "path": "app/controllers/projects.py",
+            "lines": [
+              302,
+              357
+            ],
+            "label": "app/controllers/projects.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/projects.py#L302-L357"
+          },
+          {
+            "path": "app/controllers/projects.py",
+            "lines": [
+              375,
+              431
+            ],
+            "label": "app/controllers/projects.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/projects.py#L375-L431"
+          },
+          {
+            "path": "app/controllers/projects.py",
+            "lines": [
+              1080,
+              1122
+            ],
+            "label": "app/controllers/projects.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/projects.py#L1080-L1122"
+          },
+          {
+            "path": "app/projects/project_state_v2.py",
+            "lines": [
+              226,
+              248
+            ],
+            "label": "app/projects/project_state_v2.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/projects/project_state_v2.py#L226-L248"
+          }
+        ]
+      },
+      {
+        "component": "Image/archive import and translation pipeline",
+        "files": [
+          "modules/utils/file_handler.py",
+          "modules/utils/archives.py",
+          "pipeline/main_pipeline.py",
+          "pipeline/batch_processor.py",
+          "pipeline/ocr_handler.py",
+          "pipeline/translation_handler.py"
+        ],
+        "responsibility": "FileHandler indexes archive/PDF entries and materializes pages lazily. The pipeline coordinates block detection, OCR, translation, inpainting, caches and regular/webtoon batch processing. UI controllers apply results into shared application page state.",
+        "relevant_contract": "These operations share mutable state and use the worker queue, making COMIC-2 relevant beyond project saves. Model inference and live translation behavior were not exercised.",
+        "sources": [
+          {
+            "path": "modules/utils/file_handler.py",
+            "lines": [
+              56,
+              123
+            ],
+            "label": "modules/utils/file_handler.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/modules/utils/file_handler.py#L56-L123"
+          },
+          {
+            "path": "pipeline/main_pipeline.py",
+            "lines": [
+              17,
+              47
+            ],
+            "label": "pipeline/main_pipeline.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/pipeline/main_pipeline.py#L17-L47"
+          },
+          {
+            "path": "pipeline/batch_processor.py",
+            "lines": [
+              92,
+              123
+            ],
+            "label": "pipeline/batch_processor.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/pipeline/batch_processor.py#L92-L123"
+          }
+        ]
+      },
+      {
+        "component": "Page rendering and archive/PDF export",
+        "files": [
+          "app/controllers/projects.py",
+          "app/ui/canvas/save_renderer.py",
+          "modules/utils/archives.py"
+        ],
+        "responsibility": "ProjectController groups pages, captures viewer state, renders each page into a temporary group directory and calls make() to produce ZIP/CBZ, CB7 or PDF output. Filename generation occurs before packaging; packagers see only files that survive in that directory.",
+        "relevant_contract": "Unique source pages must not map to the same temporary output path. PDF ordering uses a natural sort of generated basenames.",
+        "sources": [
+          {
+            "path": "app/controllers/projects.py",
+            "lines": [
+              556,
+              574
+            ],
+            "label": "app/controllers/projects.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/projects.py#L556-L574"
+          },
+          {
+            "path": "app/controllers/projects.py",
+            "lines": [
+              827,
+              836
+            ],
+            "label": "app/controllers/projects.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/projects.py#L827-L836"
+          },
+          {
+            "path": "app/controllers/projects.py",
+            "lines": [
+              884,
+              930
+            ],
+            "label": "app/controllers/projects.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/projects.py#L884-L930"
+          },
+          {
+            "path": "modules/utils/archives.py",
+            "lines": [
+              452,
+              470
+            ],
+            "label": "modules/utils/archives.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/modules/utils/archives.py#L452-L470"
+          },
+          {
+            "path": "modules/utils/archives.py",
+            "lines": [
+              496,
+              512
+            ],
+            "label": "modules/utils/archives.py",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/modules/utils/archives.py#L496-L512"
+          }
+        ]
+      },
+      {
+        "component": "Dependencies and packaging",
+        "files": [
+          "requirements.txt",
+          ".github/workflows/build-macos-dmg.yml",
+          "README.md"
+        ],
+        "responsibility": "README documents Python 3.12 source installation. Requirements are lower-bound declarations without a checked-in lockfile. The manually triggered macOS workflow installs dependencies/PyInstaller and calls a spec and shell script that are absent.",
+        "relevant_contract": "A clean checkout must contain or generate every referenced packaging input. Python/dependency compatibility must be validated on the chosen packaging interpreter; it was not established by this review.",
+        "sources": [
+          {
+            "path": "requirements.txt",
+            "lines": [
+              1,
+              21
+            ],
+            "label": "requirements.txt",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/requirements.txt#L1-L21"
+          },
+          {
+            "path": ".github/workflows/build-macos-dmg.yml",
+            "lines": [
+              1,
+              45
+            ],
+            "label": ".github/workflows/build-macos-dmg.yml",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/.github/workflows/build-macos-dmg.yml#L1-L45"
+          }
+        ]
+      }
+    ],
+    "immediate_mitigations": [
+      {
+        "finding_ids": [
+          "COMIC-1"
+        ],
+        "action": "Until repaired, turn off the project autosave setting for important editing sessions, use explicit sequential Save As operations to separate backup files, and reopen the saved project to verify recent edits before closing the working session.",
+        "limit": "Disabling project_autosave_enabled avoids the regular-project and per-page batch autosave branches identified here, but is not a repair. It reduces automatic protection. A manual save still needs verification; do not treat a clean title/dirty indicator alone as proof that the latest save succeeded. Keep independent backups."
+      },
+      {
+        "finding_ids": [
+          "COMIC-2"
+        ],
+        "action": "Avoid queuing multiple state-changing operations. After a worker failure, let outstanding activity settle and reload a verified saved project before continuing important edits.",
+        "limit": "UI discipline cannot guarantee serialization or stop an already running worker. This is temporary operational guidance, not a correctness control."
+      },
+      {
+        "finding_ids": [
+          "COMIC-3"
+        ],
+        "action": "For exports needed before repair, use copied input files with unique ASCII numeric basenames or place potentially colliding pages into separate export groups; verify archive/PDF page count and contents.",
+        "limit": "The current sanitizer can collapse distinct filenames, and case-insensitive filesystems introduce additional collision risks. A page-count check helps detect loss but does not prevent it. Preserve original source/project files."
+      },
+      {
+        "finding_ids": [
+          "COMIC-4"
+        ],
+        "action": "Treat macOS artifacts from the checked-in workflow as unavailable until build inputs are restored and a clean macOS run succeeds.",
+        "limit": "The review did not execute the workflow or validate any existing downloadable binary. Do not label an artifact verified solely because the workflow file exists."
+      }
+    ],
+    "implementation_sequence": [
+      {
+        "order": 1,
+        "finding_ids": [
+          "COMIC-1"
+        ],
+        "scope": "Guard regular and per-page batch autosave success handling; preserve recovery/dirty state after exceptions. Add meaningful failure/success lifecycle coverage using the existing manual-save failure guard as a local pattern.",
+        "dependencies": [],
+        "completion_gate": "Failed autosave leaves dirty state and existing recovery intact; successful unchanged-revision save cleans once; edits during save remain dirty."
+      },
+      {
+        "order": 2,
+        "finding_ids": [
+          "COMIC-2"
+        ],
+        "scope": "Make queued-operation advancement terminal and exactly once; verify failure callbacks, cancellation and immediate-worker boundaries without changing the unconditional worker finished contract.",
+        "dependencies": [
+          "Coordinate callback expectations with COMIC-1; the changes can be separate small commits."
+        ],
+        "completion_gate": "Failure of A cannot submit both B and C; B must reach terminal completion before C starts."
+      },
+      {
+        "order": 3,
+        "finding_ids": [
+          "COMIC-3"
+        ],
+        "scope": "Generate deterministic unique ordered names per export group and cover normalized/case/Unicode basename collisions.",
+        "dependencies": [],
+        "completion_gate": "Every successfully rendered page has its own output entry and preserves group order across ZIP/CBZ, CB7 and PDF."
+      },
+      {
+        "order": 4,
+        "finding_ids": [
+          "COMIC-4"
+        ],
+        "scope": "Restore checked-in or explicitly generated packaging inputs, settle the build interpreter/dependency set and validate one clean macOS package.",
+        "dependencies": [
+          "Can restore build infrastructure in parallel; validate final distributed artifact after the runtime repairs are included."
+        ],
+        "completion_gate": "Clean checkout builds the expected DMG; packaged application starts and passes targeted save/export failure checks."
+      }
+    ],
+    "findings": [
+      {
+        "id": "COMIC-1",
+        "severity": "High",
+        "title": "Failed autosave deletes recovery and marks the project saved",
+        "location": "app/controllers/projects.py",
+        "lines": "417-424; same pattern 340-350",
+        "evidence": "GenericWorker.run emits error on exception then always emits finished (app/thread_worker.py:33-37). autosave_project.on_error logs failure but does not preserve a failure flag; on_finished clears the recovery checkpoint and calls set_project_clean whenever the revision is unchanged. Per-page batch autosave duplicates this behavior.",
+        "impact": "A disk-full/permission/serialization failure can leave edits unsaved while removing the recovery copy and suppressing the close-time unsaved-changes prompt. The normal autosave completion path then sees a clean project and schedules no retry. Scope: regular-project or batch autosave; a new edit while saving preserves dirty state and triggers retry, but still deletes recovery. Recovery-only autosave is unaffected. Previously committed project data may survive.",
+        "recommendation": "Track explicit save success/failure and perform recovery deletion/clean-state updates only on success in both autosave paths; keep dirty state and recovery on failure and surface a retryable error.",
+        "validation": "Executed production autosave_project method with minimal UI collaborator stubs. Called its error then finished callbacks in the order guaranteed by GenericWorker; observed recovery deleted and marked clean, with no retry. Full Qt/disk-full UI session not run. Independent second reviewer also used actual worker, task runner and dirty-state methods, a real temporary recovery file and injected ENOSPC; observed dirty=false, recovery_exists=false, retry=false.",
+        "status": "OPEN",
+        "evidence_classification": "Confirmed",
+        "implementation_status": "PROPOSED; not implemented",
+        "change_surface": [
+          {
+            "path": "app/controllers/projects.py",
+            "lines": [
+              302,
+              357
+            ],
+            "label": "Per-page batch autosave",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/projects.py#L302-L357"
+          },
+          {
+            "path": "app/controllers/projects.py",
+            "lines": [
+              375,
+              431
+            ],
+            "label": "Regular/recovery autosave",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/projects.py#L375-L431"
+          },
+          {
+            "path": "app/controllers/projects.py",
+            "lines": [
+              1080,
+              1122
+            ],
+            "label": "Existing manual-save failure guard",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/projects.py#L1080-L1122"
+          },
+          {
+            "path": "app/thread_worker.py",
+            "lines": [
+              33,
+              37
+            ],
+            "label": "Worker terminal signal contract",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/thread_worker.py#L33-L37"
+          },
+          {
+            "path": "controller.py",
+            "lines": [
+              373,
+              395
+            ],
+            "label": "Dirty-state ownership",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/controller.py#L373-L395"
+          },
+          {
+            "path": "controller.py",
+            "lines": [
+              848,
+              878
+            ],
+            "label": "Close-time prompt",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/controller.py#L848-L878"
+          }
+        ],
+        "repair_steps": [
+          "Keep GenericWorker.finished unconditional; it is needed for terminal cleanup on both success and failure. Add explicit per-attempt save outcome tracking to both autosave paths, using the existing guarded manual-save pattern or an equally clear success/error separation.",
+          "Perform clear_recovery_checkpoint, recent-project success bookkeeping and set_project_clean only after the write succeeds. Keep the saved revision comparison so a new edit during a successful save remains dirty.",
+          "Make pending-worker/reference cleanup run once regardless of outcome. Keep failure visible and recovery intact. Define a bounded or explicit retry policy rather than silently clearing the error state or spinning on persistent disk failure.",
+          "Cover per-page batch autosaves as well as ordinary timer/debounced autosaves; their direct worker scheduling differs and is easy to miss."
+        ],
+        "invariants": [
+          "Failure never removes a previously valid recovery checkpoint and never clears unsaved state.",
+          "Success can clean only the dirty revision represented by the completed save.",
+          "Every save attempt releases its pending/reference state exactly once.",
+          "Recovery-only checkpoints remain isolated from regular-project success cleanup."
+        ],
+        "acceptance_criteria": [
+          "On unchanged-revision regular save failure, has_unsaved_changes remains true, an existing recovery file remains present and close still offers the unsaved-changes prompt.",
+          "On changed-revision failure, recovery remains present and new edits remain dirty; retry behavior is explicit.",
+          "On successful unchanged-revision save, clean-state/recovery success cleanup happens once; on successful changed-revision save, the current project remains dirty.",
+          "The same expectations hold for per-page batch autosave, and a failed save does not cause an endless immediate retry loop."
+        ],
+        "regression_cases": [
+          "Injected ENOSPC, permission failure and serialization exception before successful save completion.",
+          "Success, failure, retry success and a new edit while the save is in flight.",
+          "Regular project, recovery-only checkpoint and per-page batch paths.",
+          "A queued save followed by another operation, checking error then finished delivery and bookkeeping once."
+        ],
+        "risks_and_rollback": [
+          "Changing the meaning or emission of GenericWorker.finished would affect every caller; prefer a local autosave correction.",
+          "Retry storms or duplicate completion cleanup could create new state races; test pending flags and direct batch worker references.",
+          "Rollback a failing repair commit or binary while retaining separate project/recovery backups. Reverting code cannot restore a recovery file already deleted by the baseline defect."
+        ],
+        "existing_validation_refs": [
+          "Primary defect reproduction",
+          "Independent autosave challenge"
+        ],
+        "scope_caveats": [
+          "The false-clean result requires regular-project autosave and an unchanged dirty revision; edited-during-save failures still delete recovery but preserve dirty state.",
+          "Recovery-only autosave is unaffected by the destructive clean branch.",
+          "Previously committed SQLite project data may survive; the demonstrated risk is latest unsaved edits and recovery protection, not guaranteed loss of every historical project byte."
+        ]
+      },
+      {
+        "id": "COMIC-2",
+        "severity": "Medium",
+        "title": "One failed queue operation starts two following operations together",
+        "location": "app/controllers/task_runner.py",
+        "lines": "69-77",
+        "evidence": "Both enhanced_error_callback and enhanced_finished_callback schedule _process_next_operation. GenericWorker emits both error and finished for a failed callback, so two pending operations are popped and submitted to the threadpool before either has completed.",
+        "impact": "The serialization guarantee breaks after an ordinary file/model/network error. Image loads, project saves, and processing jobs can then share mutable state concurrently, and current_worker tracks only the most recently started job.",
+        "recommendation": "Advance the queue exactly once, normally from finished; let error only report the failure. Ensure cancellation does not reset processing state until the active worker actually completes.",
+        "validation": "Ran the real GenericWorker and TaskRunnerController classes using deterministic Signal/QTimer shims. Enqueued failing A followed by B and C; after processing A error/finished callbacks, B and C were both submitted while neither had run. Qt event-loop integration not run.",
+        "status": "OPEN",
+        "evidence_classification": "Confirmed",
+        "implementation_status": "PROPOSED; not implemented",
+        "change_surface": [
+          {
+            "path": "app/controllers/task_runner.py",
+            "lines": [
+              61,
+              90
+            ],
+            "label": "Queue completion/error handlers",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/task_runner.py#L61-L90"
+          },
+          {
+            "path": "app/controllers/task_runner.py",
+            "lines": [
+              92,
+              120
+            ],
+            "label": "Signal dispatch",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/task_runner.py#L92-L120"
+          },
+          {
+            "path": "app/controllers/task_runner.py",
+            "lines": [
+              123,
+              170
+            ],
+            "label": "Immediate and cancellation boundaries",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/task_runner.py#L123-L170"
+          },
+          {
+            "path": "app/thread_worker.py",
+            "lines": [
+              19,
+              40
+            ],
+            "label": "Worker result/error/finished emission",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/thread_worker.py#L19-L40"
+          }
+        ],
+        "repair_steps": [
+          "Choose one terminal path to advance the normal queue, normally enhanced_finished_callback. Remove queue advancement from the error-reporting callback.",
+          "Ensure user result/error/finished callback exceptions cannot accidentally create duplicate advancement or permanently strand queued work; preserve error reporting while terminal housekeeping is deterministic.",
+          "Test cancellation and clear_operation_queue against the active worker lifecycle. Do not assume GenericWorker.cancel immediately stops its callable; it mainly suppresses result delivery.",
+          "Preserve run_threaded_immediate and direct batch autosave semantics deliberately. Do not serialize all workers globally as an accidental side effect of repairing the normal queue."
+        ],
+        "invariants": [
+          "At most one normal queued operation is active until it reaches terminal completion.",
+          "One terminal operation advances the queue at most once.",
+          "Failure reports its error and still allows the next queued operation to run once.",
+          "Intentional immediate/direct worker paths remain explicit exceptions rather than being confused with normal queue serialization."
+        ],
+        "acceptance_criteria": [
+          "For failing A followed by B and C, only B is submitted after A terminates; C is submitted only after B terminates.",
+          "The same order holds when A succeeds or is cancelled.",
+          "An empty queue transitions to idle once, and a subsequently enqueued job runs once.",
+          "Callback failures and cancellation do not cause duplicate starts; any policy for handling callback exceptions is documented and exercised."
+        ],
+        "regression_cases": [
+          "Success A -> B -> C and failure A -> B -> C with observable start/finish barriers.",
+          "Failure in B, queue empty after failure, enqueue after the queue drains.",
+          "Cancellation while a callable is still running, queue clear, and enqueue during cancellation.",
+          "Immediate worker launched while queued work is active; assert the intended behavior without changing it incidentally."
+        ],
+        "risks_and_rollback": [
+          "A fix at GenericWorker emission would disturb valid finally/cleanup behavior in many callers; prefer one queue owner for advancement.",
+          "Real Qt signal delivery and timer reentrancy still need integration coverage; shimmed tests establish current logic but cannot prove all event-loop timing.",
+          "Keep the patch small enough to revert independently. During rollback avoid concurrent editing/saves and reopen a verified saved project before continuing critical work."
+        ],
+        "existing_validation_refs": [
+          "Primary defect reproduction"
+        ],
+        "scope_caveats": [
+          "The demonstrated failure requires at least two later queued jobs. With fewer jobs the duplicate callbacks can still disturb queue idle state, but that additional scenario was not the reported reproduction.",
+          "Specific data corruption was not demonstrated; concurrency and a current_worker pointer that tracks only the last submission were demonstrated/traced."
+        ]
+      },
+      {
+        "id": "COMIC-3",
+        "severity": "Medium",
+        "title": "Distinct page filenames collide during export and silently lose pages",
+        "location": "app/controllers/projects.py",
+        "lines": "827-836; 923-924",
+        "evidence": "_build_export_page_name sanitizes all non-ASCII or special characters but ignores page_number unless the resulting stem is empty. a b.png and a?b.png both map to a_b.png. save_and_make_worker saves them into the same group directory without collision detection, overwriting the first page before make() packs the directory.",
+        "impact": "The generated archive/PDF silently omits pages. Distinct original basenames also bypass the duplicate-basename partition prompt, so this affects ordinary international/special-character filenames even when originals are unique.",
+        "recommendation": "Generate unique ordered names within every export group, for example prefix each sanitized filename with its page_number; preserve every page regardless of basename or case collisions.",
+        "validation": "Executed the real export naming and save_and_make_worker methods with a minimal file-writing renderer. Two distinct input pages produced only one a_b.png containing the second page at archive creation time.",
+        "status": "OPEN",
+        "evidence_classification": "Confirmed",
+        "implementation_status": "PROPOSED; not implemented",
+        "change_surface": [
+          {
+            "path": "app/controllers/projects.py",
+            "lines": [
+              802,
+              811
+            ],
+            "label": "Partition prompt compares original basenames",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/projects.py#L802-L811"
+          },
+          {
+            "path": "app/controllers/projects.py",
+            "lines": [
+              827,
+              836
+            ],
+            "label": "Page filename generation",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/projects.py#L827-L836"
+          },
+          {
+            "path": "app/controllers/projects.py",
+            "lines": [
+              900,
+              927
+            ],
+            "label": "Rendering and packaging loop",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/app/controllers/projects.py#L900-L927"
+          },
+          {
+            "path": "modules/utils/archives.py",
+            "lines": [
+              437,
+              470
+            ],
+            "label": "Archive and PDF enumeration",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/modules/utils/archives.py#L437-L470"
+          }
+        ],
+        "repair_steps": [
+          "Make output names unique within each export group, preferably by always prefixing a stable zero-padded page ordinal and retaining a sanitized readable suffix. Use sufficient ordinal width for the group size.",
+          "Keep path creation inside the group directory, preserve a supported extension and make output ordering deterministic. If preserving basenames exactly is a requirement, use an explicit collision allocator instead; do not rely on the partition dialog.",
+          "Use the resolved output name for the renderer and every downstream reference. Add coverage proving distinct page payloads survive through directory staging and packaging.",
+          "Keep original page identity and project paths unchanged; this repair concerns generated export entries."
+        ],
+        "invariants": [
+          "Distinct successfully rendered pages in one group never share an output path, including after sanitization or case normalization.",
+          "Export order corresponds to the group page order, including PDF natural-sort behavior.",
+          "Grouping and naming do not mutate original inputs or project identity."
+        ],
+        "acceptance_criteria": [
+          "Two pages with colliding sanitized stems produce two entries with distinct expected contents.",
+          "Duplicate basenames from separate folders, Unicode-only names, case variants and names stripped to fallback stems remain distinct.",
+          "Each export group has the expected number and order of rendered pages in real ZIP/CBZ, CB7 and PDF output.",
+          "Ordinary filenames, text/patch rendering and existing grouping behavior still work."
+        ],
+        "regression_cases": [
+          "Baseline pair a b.png and a?b.png on a filesystem that supports them; portable cross-platform pair a b.png and a+b.png.",
+          "Same basename from different directories and case-only differences on a case-insensitive filesystem.",
+          "Non-Latin names that normalize identically or to an empty stem; page numbers beyond the default padding width.",
+          "Multiple chapter groups and a single group; mixed supported image extensions; real archive entry and PDF page integrity."
+        ],
+        "risks_and_rollback": [
+          "Generated export filenames may change, which can affect external reading/bookmark workflows; call out the new convention in release notes.",
+          "A naive numeric prefix can order incorrectly at high page counts unless the width or sort behavior is defined.",
+          "Rollback is limited to generated output naming. Keep source projects and generate exports to separate files so an incorrect new artifact can be discarded and regenerated. Already overwritten staging pages cannot be recovered from the old exported archive alone."
+        ],
+        "existing_validation_refs": [
+          "Primary defect reproduction"
+        ],
+        "scope_caveats": [
+          "The demonstrated loss is in the generated export, not deletion of original input images.",
+          "The review used a minimal renderer and intercepted packaging input; actual PDF/CB7 rendering and file-format integrity were not tested."
+        ]
+      },
+      {
+        "id": "COMIC-4",
+        "severity": "Medium",
+        "title": "The only macOS packaging workflow references files absent from the repository",
+        "location": ".github/workflows/build-macos-dmg.yml",
+        "lines": "32-37",
+        "evidence": "The workflow runs pyinstaller ct-mac.spec and chmod +x builddmg.sh / ./builddmg.sh, but neither ct-mac.spec nor builddmg.sh exists in the pinned checkout or git ls-files. There is no preceding step generating either.",
+        "impact": "The workflow cannot produce the advertised macOS DMG from a clean checkout, regardless of dependency installation success.",
+        "recommendation": "Check in the intended PyInstaller spec and DMG build script or change workflow commands to a complete checked-in build entry point; validate one clean macOS Actions run.",
+        "validation": "Confirmed both files absent via filesystem checks and git ls-files; inspected full workflow. GitHub Actions/macOS build not executed.",
+        "status": "OPEN",
+        "evidence_classification": "Confirmed",
+        "implementation_status": "PROPOSED; not implemented",
+        "change_surface": [
+          {
+            "path": ".github/workflows/build-macos-dmg.yml",
+            "lines": [
+              8,
+              45
+            ],
+            "label": "Clean macOS build steps",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/.github/workflows/build-macos-dmg.yml#L8-L45"
+          },
+          {
+            "path": "README.md",
+            "lines": [
+              92,
+              126
+            ],
+            "label": "Documented Python source-install setup",
+            "url": "https://github.com/wwongw21/comic-translate/blob/010048b358cd11e625fedb4d5843b37fa6368e12/README.md#L92-L126"
+          }
+        ],
+        "repair_steps": [
+          "Locate or recreate the intended PyInstaller spec and DMG script under version control, or replace both workflow invocations with a complete checked-in build entry point. No missing script/spec was located in this fork.",
+          "Ensure every icon/resource/hidden import required by the GUI and model/runtime modules is included, and that the build does not depend on untracked developer-machine files.",
+          "Choose a supported build interpreter and tested dependency resolution, reconciling the README Python 3.12 setup with the workflow Python 3.14.5 request through evidence rather than assuming compatibility.",
+          "Run a clean macOS workflow and validate the actual installed/launched app plus targeted runtime repairs before considering release packaging restored."
+        ],
+        "invariants": [
+          "Every file directly invoked by the workflow exists in the checkout or is generated explicitly by an earlier reproducible step.",
+          "The expected dist/Comic Translate.dmg is produced from the reviewed commit without untracked local inputs.",
+          "A built artifact includes required resources and can launch on the intended macOS target."
+        ],
+        "acceptance_criteria": [
+          "Clean checkout can complete dependency installation, PyInstaller packaging, DMG creation and artifact upload.",
+          "The workflow uses an explicit validated interpreter and retains logs/artifact provenance.",
+          "Opening the DMG and launching the packaged app succeeds; save/export regression checks pass in the packaged environment."
+        ],
+        "regression_cases": [
+          "Fresh macOS runner with empty caches and no developer-local packaging files.",
+          "Resource/icon/Qt plugin discovery; cold application launch and open existing project.",
+          "Failed-save dirty/recovery behavior and representative export behavior in the packaged app.",
+          "Architecture/deployment target combinations explicitly supported by the maintainer; no untested compatibility claim."
+        ],
+        "risks_and_rollback": [
+          "Restoring missing inputs may expose further packaging or dependency compatibility failures; this review did not establish a complete correct spec.",
+          "Packaging can pass while required lazy imports/resources are absent; artifact launch and real workflows are necessary.",
+          "If the candidate package fails, withhold it or revert to a previously independently verified artifact. This review did not establish that any existing published artifact is verified."
+        ],
+        "existing_validation_refs": [
+          "Tracked packaging inputs and test inventory"
+        ],
+        "scope_caveats": [
+          "Missing referenced files are confirmed statically; no GitHub Actions dispatch or macOS build was run.",
+          "The Python-version difference is a validation task, not a separate confirmed defect."
+        ]
+      }
+    ],
+    "reproductions": [
+      {
+        "name": "Primary defect reproductions and Python syntax coverage",
+        "command": "python /workspace/review/comic_repro.py",
+        "working_directory": "Any directory; the script reads /workspace/repos/comic-translate by absolute path.",
+        "prerequisites": [
+          "Python 3.12 was used in the review environment.",
+          "Pinned checkout at /workspace/repos/comic-translate and the supplied evidence script at /workspace/review/comic_repro.py.",
+          "Standard library only; the script replaces Qt signals/timers with deterministic shims and extracts selected production methods. It does not require PySide6, models, paid credentials or network access."
+        ],
+        "observed_status": "RUN; all defect assertions passed.",
+        "observed_results": [
+          "QUEUE REPRO: a failed first job starts B and C before either finishes; active pending workers = 2.",
+          "EXPORT REPRO: two distinct input pages produce only a_b.png containing the second page at packaging time.",
+          "BUILD REPRO: ct-mac.spec and builddmg.sh are missing.",
+          "SYNTAX: compiled all 285 Python files in memory without writing bytecode. A SyntaxWarning appeared for an existing invalid escape sequence in the vendored Pororo utility.",
+          "AUTOSAVE REPRO: failed save caused recovery deleted and marked clean; no retry was scheduled."
+        ],
+        "what_it_proves": "Production callback, naming and export-worker control flow under deterministic collaborators; missing packaging inputs; source syntax validity.",
+        "what_it_does_not_prove": "Actual Qt delivery/integration, rendering fidelity, real disk exhaustion, model inference, paid API behavior or a successful macOS build.",
+        "future_use": "These assertions intentionally confirm current defects. After repair, convert them into regression checks asserting the corrected behavior; a raw assertion failure after a fix may be expected and is not by itself a regression."
+      },
+      {
+        "name": "Independent autosave challenge",
+        "command": "python /workspace/review/comic_autosave_challenge.py",
+        "working_directory": "Any directory; the script reads the pinned checkout by absolute path.",
+        "prerequisites": [
+          "Python standard library.",
+          "The pinned checkout and supplied script; the script creates temporary recovery files under /workspace/review.",
+          "No PySide6 or models required; Qt Signal/QTimer behavior is shimmed."
+        ],
+        "observed_status": "RUN by an independent reviewer; all assertions passed.",
+        "observed_results": [
+          {
+            "case": "Regular project autosave, no new edit during save, injected OSError(28)",
+            "dirty_after_failure": false,
+            "recovery_exists_after_failure": false,
+            "retry_scheduled": false
+          },
+          {
+            "case": "Regular project autosave, revision changed during save, injected OSError(28)",
+            "dirty_after_failure": true,
+            "recovery_exists_after_failure": false,
+            "retry_scheduled": true
+          },
+          {
+            "case": "Recovery-only autosave, injected OSError(28)",
+            "dirty_after_failure": true,
+            "recovery_exists_after_failure": true,
+            "retry_scheduled": false
+          }
+        ],
+        "what_it_proves": "Actual GenericWorker, task-runner, autosave, recovery-deletion and dirty-state methods reproduce the scoped failure with a real temporary recovery file. The clean state is not a fake return value.",
+        "what_it_does_not_prove": "Live GUI behavior, physical disk-full behavior or full SQLite recovery characteristics. Per-page batch duplication was confirmed by source, not this independent runtime probe."
+      },
+      {
+        "name": "Tracked packaging inputs and test inventory",
+        "commands": [
+          "git -C /workspace/repos/comic-translate ls-files '*spec' '*dmg*' '*test*' 'AGENTS.md'",
+          "git -C /workspace/repos/comic-translate status --short"
+        ],
+        "prerequisites": [
+          "Git and the pinned checkout."
+        ],
+        "observed_status": "RUN.",
+        "observed_results": [
+          "Only .github/workflows/build-macos-dmg.yml matched the packaging/test/instruction filename search. ct-mac.spec and builddmg.sh are absent.",
+          "No test directory or tracked test files were found in this checkout.",
+          "Checkout status was clean; review evidence is stored outside the repository."
+        ],
+        "limit": "No test files found does not prove every external/upstream validation process is absent. The search and checkout describe this fork and commit."
+      }
+    ],
+    "release_verification": [
+      {
+        "stage": "Source and new regression coverage",
+        "status": "PROPOSED; NOT RUN after repairs because no repairs exist.",
+        "steps": [
+          "Review each narrow patch against this pinned baseline and preserve unrelated work.",
+          "Add focused regression coverage at the stable task/save/export seams described below. There is currently no checked-in test suite to invoke; choose and check in the test setup before naming a standard test command.",
+          "Rerun Python compilation and the adapted evidence checks. Existing defect-asserting scripts must be updated or interpreted as baseline probes, not treated as passing post-fix gates."
+        ]
+      },
+      {
+        "stage": "Qt integration and failure handling",
+        "status": "NOT RUN.",
+        "prerequisites": [
+          "A disposable environment with the required PySide6/runtime dependencies installed.",
+          "Copied comics/projects and a disposable recovery location.",
+          "Controlled save-failure injection or an unwritable/disposable filesystem; do not test disk exhaustion on real user data."
+        ],
+        "steps": [
+          "Launch the application from a configured source environment with python comic.py.",
+          "Edit a page, create a recovery checkpoint, enable project autosave and force a save failure. Confirm the UI remains dirty, existing recovery survives, an understandable retry path is available and closing still warns about unsaved edits.",
+          "Allow a successful retry; confirm only the revision actually saved is clean. Make a new edit during a save and verify it remains dirty afterward.",
+          "Run at least three queued operations with the first failing and the next two blocked at observable barriers. Verify the third never starts while the second is still active. Exercise cancellation and clear-queue behavior separately.",
+          "Perform per-page batch autosave failure/success checks with temporary data; ensure direct workers are released once and failure does not remove recovery."
+        ]
+      },
+      {
+        "stage": "Real export integrity",
+        "status": "NOT RUN.",
+        "prerequisites": [
+          "Disposable image fixtures with distinguishable page content.",
+          "Dependencies needed for actual rendering and each chosen archive/PDF format."
+        ],
+        "steps": [
+          "Export pages whose original basenames normalize to the same stem, including space versus plus, duplicate basenames in different folders, Unicode names and case variants on a case-insensitive filesystem.",
+          "Inspect ZIP/CBZ and CB7 entry counts and decode/compare the distinguishable pages. For PDF, inspect page count, page order and visible page contents.",
+          "Verify separate export groups have independent naming scopes and that ordinary filenames, patches, text rendering and webtoon output still work.",
+          "Do not infer PDF/CB7 success from the mocked-renderer baseline probe."
+        ]
+      },
+      {
+        "stage": "macOS clean build and distributed app",
+        "status": "NOT RUN.",
+        "prerequisites": [
+          "Restored/generated packaging inputs included in the patch.",
+          "A clean macOS runner with the explicitly chosen supported Python version and dependency set."
+        ],
+        "steps": [
+          "Trigger the existing Build macOS DMG workflow from a clean checkout of the repaired commit; preserve its logs and artifact metadata. No workflow dispatch was performed in this review.",
+          "Confirm PyInstaller discovers all application modules, Qt resources, icons and required runtime data; open the generated DMG and launch the packaged application on the intended macOS target.",
+          "Repeat targeted save failure, recovery reopen, ordinary page translation and real export checks in the packaged app. Paid/model-dependent checks require configured test credentials/assets and have not been run.",
+          "Publish only after the artifact corresponds to the reviewed repaired commit and the above release evidence is attached."
+        ]
+      }
+    ],
+    "proposed_follow_up": [
+      {
+        "item": "Establish a small checked-in test harness for worker lifecycle, autosave and export naming.",
+        "rationale": "No test files were found; the supplied scripts are review evidence outside the repo.",
+        "status": "PROPOSED; not an implemented change or a claimed existing test suite."
+      },
+      {
+        "item": "Record a tested interpreter/dependency resolution for repeatable packaging.",
+        "rationale": "README uses Python 3.12 while the workflow requests 3.14.5; requirements are broad minimum bounds. Compatibility was not evaluated.",
+        "status": "PROPOSED; no compatibility failure is asserted solely from this mismatch."
+      },
+      {
+        "item": "Review task cancellation, immediate jobs and direct batch autosave concurrency with a real Qt event loop after the targeted queue fix.",
+        "rationale": "These paths deliberately bypass or alter queue state and deserve integration coverage. They were not independently established as additional defects in this handoff.",
+        "status": "PROPOSED investigation."
+      }
+    ],
+    "evidence_files": [
+      "/workspace/review/comic.json",
+      "/workspace/review/comic_repro.py",
+      "/workspace/review/comic_autosave_challenge.py",
+      "/workspace/review/comic_independent.json"
+    ],
+    "coverage_limits": [
+      "No PySide6 installed, so no real GUI session or Qt event loop was exercised. Signal/timer behavior in the queue reproduction uses small deterministic shims.",
+      "No model downloads, OCR/inpainting inference, paid translation calls, GPU checks, macOS packaging, or live upstream services were run.",
+      "No dependency vulnerability database scan was run. Dependency requirements are unpinned minimum bounds with no lockfile; reproducibility was reviewed statically.",
+      "This is broad repository review, not an exhaustive line-by-line audit or formal security scan."
+    ],
+    "change_record": "Only review/handoff evidence was written outside the repository. No fixes, commits, pull requests, workflow runs or releases were created."
+  },
+  "handoff_date": "2026-10-22",
+  "all_findings_status": "OPEN",
+  "implementation_status": "No repairs applied; proposed work only.",
+  "delivery_notes": {
+    "destination_repository": "wwongw21/comic-translate",
+    "status": "All findings remain OPEN; documentation transfer only.",
+    "portable_evidence": "This JSON retains the complete repository-specific handoff. Historical /workspace paths are evidence references and prerequisites, not portable hyperlinks. Applicable repository-specific diagnostics are included alongside the report.",
+    "diagnostics_included": [
+      "comic_repro.py",
+      "comic_autosave_challenge.py",
+      "comic_independent.json"
+    ],
+    "not_included": "Original environments, model weights, user data and complete source snapshots are not included. Clone the pinned source and follow the recorded prerequisites. Bug-demonstration scripts intentionally assert pre-fix behavior; they are not a post-fix passing suite."
+  }
+}
