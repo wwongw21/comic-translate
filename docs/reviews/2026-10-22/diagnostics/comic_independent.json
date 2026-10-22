@@ -1,0 +1,27 @@
+{
+  "reviewer":"vpn_review",
+  "finding":"COMIC-1",
+  "decision":"Confirmed; retain High severity with explicit scope",
+  "sha":"010048b358cd11e625fedb4d5843b37fa6368e12",
+  "evidence":[
+    "GenericWorker.run emits error when save throws, then finished unconditionally (app/thread_worker.py:33-37). TaskRunnerController wires both callbacks, without filtering finished after an error (app/controllers/task_runner.py:69-77, 109-117).",
+    "autosave_project.on_finished unconditionally deletes recovery on a regular-project target and marks clean when dirty revision has not changed (app/controllers/projects.py:417-424); on_error does not set a failure guard (409-415).",
+    "Production has_unsaved_changes/set_project_clean logic confirms marking clean clears manual dirty and all undo clean flags (controller.py:373-395). Close prompts only when has_unsaved_changes is true (controller.py:848-878).",
+    "Independent execution used actual GenericWorker, TaskRunnerController, autosave_project, clear_recovery_checkpoint, has_unsaved_changes, and set_project_clean methods with Qt Signal/QTimer shims and a real temporary recovery file. Injected OSError(28, No space left on device). Observed no clean-state simulation stub: production dirty methods were used."
+  ],
+  "results":[
+    {"target":"regular project autosave","edited_during_save":false,"dirty_after_failure":false,"recovery_exists_after_failure":false,"retry_scheduled":false},
+    {"target":"regular project autosave","edited_during_save":true,"dirty_after_failure":true,"recovery_exists_after_failure":false,"retry_scheduled":true},
+    {"target":"recovery checkpoint only","edited_during_save":false,"dirty_after_failure":true,"recovery_exists_after_failure":true,"retry_scheduled":false}
+  ],
+  "counterarguments_and_scope":[
+    "Not every autosave failure loses clean state: the regular-project path requires project_autosave_enabled and a project_file; recovery-only interval saves do not run the destructive clean branch.",
+    "When dirty revision changes during the failed save, the project remains dirty and a retry is scheduled. Recovery is still deleted on that path.",
+    "Per-page batch autosave repeats the same unconditional finished clean logic; independent runtime reproduction focused regular autosave, with batch confirmed by source.",
+    "A pre-existing recovery file must exist for deletion to remove actual recovery data; otherwise deletion is a no-op but false-clean/close suppression still applies.",
+    "The SQLite writer may preserve the last successfully saved project via transactional behavior; report loss of latest unsaved edits, not unavoidable corruption of the entire prior project.",
+    "No live Qt event loop or real disk-full GUI run. Signal/timer shims were used. The core failure does not rely on callback ordering beyond finished eventually running, since its destructive branch contains no success guard."
+  ],
+  "reproduction":"/workspace/review/comic_autosave_challenge.py",
+  "source_changes":"None"
+}
