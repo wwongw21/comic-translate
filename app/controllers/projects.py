@@ -848,7 +848,22 @@ class ProjectController:
         if not stem:
             stem = "page"
         ordinal_width = max(4, int(ordinal_width))
-        return f"{page_number:0{ordinal_width}d}_{stem}{ext}"
+        prefix = f"{page_number:0{ordinal_width}d}_"
+        stem_byte_budget = (
+            255
+            - len(prefix.encode("utf-8"))
+            - len(ext.encode("utf-8"))
+        )
+        if stem_byte_budget < 0:
+            raise ValueError("Page number and extension exceed the export filename limit")
+
+        # The sanitized stem is ASCII, so truncating by bytes cannot split a
+        # character. Leave room for the ordinal and extension on 255-byte
+        # filesystems, then avoid a trailing dot in Windows filenames.
+        stem = stem.encode("ascii")[:stem_byte_budget].decode("ascii").rstrip("._-")
+        if not stem and stem_byte_budget:
+            stem = "page"[:stem_byte_budget]
+        return f"{prefix}{stem}{ext}"
 
     def _build_export_plan(self, output_path: str, chapter_names_by_path: dict[str, str]) -> list[dict]:
         extension = os.path.splitext(output_path)[1] or ".zip"

@@ -500,6 +500,53 @@ class ExportTests(unittest.TestCase):
             "10000_page.png",
         )
 
+    def test_export_worker_bounds_near_limit_basename_by_utf8_bytes(self):
+        long_path = f"/input/{'a' * 247}.png"
+        controller = self._controller([long_path])
+        viewer_states = {long_path: {"viewer_state": {}}}
+        saved_names = []
+        method_globals = ProjectController.save_and_make_worker.__globals__
+        old_renderer = method_globals["ImageSaveRenderer"]
+        old_make = method_globals["make"]
+
+        class CaptureRenderer:
+            def __init__(self, _image):
+                pass
+
+            def apply_patches(self, _patches):
+                pass
+
+            def add_state_to_image(self, _state):
+                pass
+
+            def save_image(self, path):
+                saved_names.append(os.path.basename(path))
+
+        def capture_make(directory, _output_path):
+            self.assertTrue(Path(directory).is_dir())
+            self.assertEqual(len(saved_names), 1)
+
+        method_globals["ImageSaveRenderer"] = CaptureRenderer
+        method_globals["make"] = capture_make
+
+        def restore_globals():
+            method_globals["ImageSaveRenderer"] = old_renderer
+            method_globals["make"] = old_make
+
+        self.addCleanup(restore_globals)
+        with tempfile.TemporaryDirectory() as directory:
+            controller.save_and_make_worker(
+                [{"page_indices": [0], "output_path": str(Path(directory) / "out.cbz")}],
+                viewer_states,
+            )
+
+        self.assertEqual(len(saved_names), 1)
+        page_name = saved_names[0]
+        self.assertLessEqual(len(page_name.encode("utf-8")), 255)
+        self.assertEqual(len(page_name.encode("utf-8")), 255)
+        self.assertTrue(page_name.startswith("0001_"))
+        self.assertTrue(page_name.endswith(".png"))
+
 
 class MacPackagingTests(unittest.TestCase):
     def test_workflow_build_files_exist_and_match_expected_artifact(self):
