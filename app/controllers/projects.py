@@ -299,6 +299,20 @@ class ProjectController:
         # Real-time autosave writes directly to the open project file.
         self.autosave_project(prefer_project_file=True)
 
+    def _show_autosave_failure(self):
+        try:
+            MMessage.error(
+                text=self.main.tr(
+                    "Project autosave failed. Your changes are still unsaved. "
+                    "You can try saving again from the File menu."
+                ),
+                parent=self.main,
+                duration=None,
+                closable=True,
+            )
+        except Exception:
+            logger.exception("Failed to display project autosave failure")
+
     def _on_batch_page_done(self, image_path: str):
         """Triggered by render_state_ready after each page is processed during batch.
         Saves the project file immediately so progress is not lost between pages.
@@ -324,18 +338,13 @@ class ProjectController:
 
         worker = GenericWorker(self.save_project, target_file)
         self._active_save_workers.append(worker)  # prevent GC until done
+        save_failed = {"value": False}
 
         def on_error(error_tuple):
-            try:
-                self._active_save_workers.remove(worker)
-            except ValueError:
-                pass
-            self._autosave_save_pending = False
+            save_failed["value"] = True
             exctype, value, _ = error_tuple
             logger.warning("Per-page autosave failed for %s: %s: %s", image_path, exctype.__name__, value)
-            if self._autosave_retrigger_requested:
-                self._autosave_retrigger_requested = False
-                self._on_batch_page_done(image_path)
+            self._show_autosave_failure()
 
         def on_finished():
             try:
@@ -343,13 +352,16 @@ class ProjectController:
             except ValueError:
                 pass
             self._autosave_save_pending = False
-            self.clear_recovery_checkpoint()
-            self.add_recent_project(target_file)
-            self._refresh_home_screen()
-            if self.main._dirty_revision == autosave_start_revision:
-                self.main.set_project_clean()
-            if self._autosave_retrigger_requested:
-                self._autosave_retrigger_requested = False
+            retrigger_requested = self._autosave_retrigger_requested
+            self._autosave_retrigger_requested = False
+
+            if not save_failed["value"]:
+                self.add_recent_project(target_file)
+                self._refresh_home_screen()
+                if self.main._dirty_revision == autosave_start_revision:
+                    self.clear_recovery_checkpoint()
+                    self.main.set_project_clean()
+            if not save_failed["value"] and retrigger_requested:
                 self._on_batch_page_done(image_path)
 
         worker.signals.error.connect(
@@ -405,27 +417,31 @@ class ProjectController:
         is_regular_project_save = bool(self.main.project_file and target_file == self.main.project_file)
         autosave_start_revision = self.main._dirty_revision
         self._autosave_save_pending = True
+        save_failed = {"value": False}
 
         def on_error(error_tuple):
-            self._autosave_save_pending = False
+            save_failed["value"] = True
             exctype, value, _ = error_tuple
             logger.warning("Project autosave failed: %s: %s", exctype.__name__, value)
-            if self._autosave_retrigger_requested:
-                self._autosave_retrigger_requested = False
-                self._realtime_autosave_timer.start()
+            self._show_autosave_failure()
 
         def on_finished():
             self._autosave_save_pending = False
-            if is_regular_project_save:
-                self.clear_recovery_checkpoint()
+            retrigger_requested = self._autosave_retrigger_requested
+            self._autosave_retrigger_requested = False
+
+            if not save_failed["value"] and is_regular_project_save:
                 self.add_recent_project(target_file)
                 self._refresh_home_screen()
                 if self.main._dirty_revision == autosave_start_revision:
+                    self.clear_recovery_checkpoint()
                     self.main.set_project_clean()
-            if self._autosave_retrigger_requested or (
-                is_regular_project_save and self.main.has_unsaved_changes()
+
+            if retrigger_requested or (
+                not save_failed["value"]
+                and is_regular_project_save
+                and self.main.has_unsaved_changes()
             ):
-                self._autosave_retrigger_requested = False
                 self._realtime_autosave_timer.start()
 
         self.main.run_threaded(self.save_project, None, on_error, on_finished, target_file)

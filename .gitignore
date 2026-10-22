@@ -20,6 +20,7 @@ uv.lock
 
 # Test files
 test_*.py
+!tests/test_project_autosave.py
 demo_*.py
 benchmarks/
 
