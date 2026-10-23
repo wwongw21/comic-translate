@@ -299,6 +299,20 @@ class ProjectController:
         # Real-time autosave writes directly to the open project file.
         self.autosave_project(prefer_project_file=True)
 
+    def _show_autosave_failure(self):
+        try:
+            MMessage.error(
+                text=self.main.tr(
+                    "Project autosave failed. Your changes are still unsaved. "
+                    "You can try saving again from the File menu."
+                ),
+                parent=self.main,
+                duration=None,
+                closable=True,
+            )
+        except Exception:
+            logger.exception("Failed to display project autosave failure")
+
     def _on_batch_page_done(self, image_path: str):
         """Triggered by render_state_ready after each page is processed during batch.
         Saves the project file immediately so progress is not lost between pages.
@@ -324,18 +338,13 @@ class ProjectController:
 
         worker = GenericWorker(self.save_project, target_file)
         self._active_save_workers.append(worker)  # prevent GC until done
+        save_failed = {"value": False}
 
         def on_error(error_tuple):
-            try:
-                self._active_save_workers.remove(worker)
-            except ValueError:
-                pass
-            self._autosave_save_pending = False
+            save_failed["value"] = True
             exctype, value, _ = error_tuple
             logger.warning("Per-page autosave failed for %s: %s: %s", image_path, exctype.__name__, value)
-            if self._autosave_retrigger_requested:
-                self._autosave_retrigger_requested = False
-                self._on_batch_page_done(image_path)
+            self._show_autosave_failure()
 
         def on_finished():
             try:
@@ -343,13 +352,16 @@ class ProjectController:
             except ValueError:
                 pass
             self._autosave_save_pending = False
-            self.clear_recovery_checkpoint()
-            self.add_recent_project(target_file)
-            self._refresh_home_screen()
-            if self.main._dirty_revision == autosave_start_revision:
-                self.main.set_project_clean()
-            if self._autosave_retrigger_requested:
-                self._autosave_retrigger_requested = False
+            retrigger_requested = self._autosave_retrigger_requested
+            self._autosave_retrigger_requested = False
+
+            if not save_failed["value"]:
+                self.add_recent_project(target_file)
+                self._refresh_home_screen()
+                if self.main._dirty_revision == autosave_start_revision:
+                    self.clear_recovery_checkpoint()
+                    self.main.set_project_clean()
+            if not save_failed["value"] and retrigger_requested:
                 self._on_batch_page_done(image_path)
 
         worker.signals.error.connect(
@@ -405,27 +417,31 @@ class ProjectController:
         is_regular_project_save = bool(self.main.project_file and target_file == self.main.project_file)
         autosave_start_revision = self.main._dirty_revision
         self._autosave_save_pending = True
+        save_failed = {"value": False}
 
         def on_error(error_tuple):
-            self._autosave_save_pending = False
+            save_failed["value"] = True
             exctype, value, _ = error_tuple
             logger.warning("Project autosave failed: %s: %s", exctype.__name__, value)
-            if self._autosave_retrigger_requested:
-                self._autosave_retrigger_requested = False
-                self._realtime_autosave_timer.start()
+            self._show_autosave_failure()
 
         def on_finished():
             self._autosave_save_pending = False
-            if is_regular_project_save:
-                self.clear_recovery_checkpoint()
+            retrigger_requested = self._autosave_retrigger_requested
+            self._autosave_retrigger_requested = False
+
+            if not save_failed["value"] and is_regular_project_save:
                 self.add_recent_project(target_file)
                 self._refresh_home_screen()
                 if self.main._dirty_revision == autosave_start_revision:
+                    self.clear_recovery_checkpoint()
                     self.main.set_project_clean()
-            if self._autosave_retrigger_requested or (
-                is_regular_project_save and self.main.has_unsaved_changes()
+
+            if retrigger_requested or (
+                not save_failed["value"]
+                and is_regular_project_save
+                and self.main.has_unsaved_changes()
             ):
-                self._autosave_retrigger_requested = False
                 self._realtime_autosave_timer.start()
 
         self.main.run_threaded(self.save_project, None, on_error, on_finished, target_file)
@@ -824,16 +840,30 @@ class ProjectController:
         return candidate
 
     @staticmethod
-    def _build_export_page_name(page_number: int, file_path: str) -> str:
-        # Use the original filename directly
+    def _build_export_page_name(page_number: int, file_path: str, ordinal_width: int = 4) -> str:
         basename = os.path.basename(file_path)
-        # Sanitize the filename to remove any problematic characters
         stem = os.path.splitext(basename)[0]
         ext = os.path.splitext(basename)[1].lower() or ".png"
         stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
         if not stem:
-            stem = f"page_{page_number:04d}"
-        return f"{stem}{ext}"
+            stem = "page"
+        ordinal_width = max(4, int(ordinal_width))
+        prefix = f"{page_number:0{ordinal_width}d}_"
+        stem_byte_budget = (
+            255
+            - len(prefix.encode("utf-8"))
+            - len(ext.encode("utf-8"))
+        )
+        if stem_byte_budget < 0:
+            raise ValueError("Page number and extension exceed the export filename limit")
+
+        # The sanitized stem is ASCII, so truncating by bytes cannot split a
+        # character. Leave room for the ordinal and extension on 255-byte
+        # filesystems, then avoid a trailing dot in Windows filenames.
+        stem = stem.encode("ascii")[:stem_byte_budget].decode("ascii").rstrip("._-")
+        if not stem and stem_byte_budget:
+            stem = "page"[:stem_byte_budget]
+        return f"{prefix}{stem}{ext}"
 
     def _build_export_plan(self, output_path: str, chapter_names_by_path: dict[str, str]) -> list[dict]:
         extension = os.path.splitext(output_path)[1] or ".zip"
@@ -900,6 +930,7 @@ class ProjectController:
             for group_index, group in enumerate(export_plan, start=1):
                 group_dir = os.path.join(temp_dir, f"group_{group_index:03d}")
                 os.makedirs(group_dir, exist_ok=True)
+                ordinal_width = max(4, len(str(max(1, len(group["page_indices"])))))
                 for page_number, page_idx in enumerate(group["page_indices"], start=1):
                     file_path = self.main.image_files[page_idx]
                     
@@ -920,7 +951,10 @@ class ProjectController:
                     else:
                         renderer.add_state_to_image(viewer_state)
 
-                    sv_pth = os.path.join(group_dir, self._build_export_page_name(page_number, file_path))
+                    sv_pth = os.path.join(
+                        group_dir,
+                        self._build_export_page_name(page_number, file_path, ordinal_width),
+                    )
                     renderer.save_image(sv_pth)
 
                 os.makedirs(os.path.dirname(group["output_path"]) or ".", exist_ok=True)

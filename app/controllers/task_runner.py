@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import deque
+import logging
+import traceback
 from typing import TYPE_CHECKING, Callable
 
 from PySide6 import QtCore
@@ -10,6 +12,9 @@ from app.thread_worker import GenericWorker
 
 if TYPE_CHECKING:
     from controller import ComicTranslate
+
+
+logger = logging.getLogger(__name__)
 
 
 class TaskRunnerController:
@@ -65,29 +70,59 @@ class TaskRunnerController:
 
         self.is_processing_queue = True
         operation = self.operation_queue.popleft()
+        completion = {"scheduled": False}
+
+        def schedule_next_operation():
+            if completion["scheduled"]:
+                return
+            completion["scheduled"] = True
+            QtCore.QTimer.singleShot(0, self.main, self._process_next_operation)
 
         def enhanced_finished_callback():
-            if operation["finished_callback"]:
-                operation["finished_callback"]()
-            QtCore.QTimer.singleShot(0, self.main, self._process_next_operation)
+            try:
+                self._invoke_callback(
+                    operation["finished_callback"], callback_name="finished"
+                )
+            finally:
+                schedule_next_operation()
 
         def enhanced_error_callback(error_tuple):
-            if operation["error_callback"]:
-                operation["error_callback"](error_tuple)
-            QtCore.QTimer.singleShot(0, self.main, self._process_next_operation)
+            self._invoke_callback(
+                operation["error_callback"], error_tuple, callback_name="error"
+            )
 
         def enhanced_result_callback(result):
-            if operation["result_callback"]:
-                operation["result_callback"](result)
+            self._invoke_callback(
+                operation["result_callback"], result, callback_name="result"
+            )
 
-        self._execute_single_operation(
-            operation["callback"],
-            enhanced_result_callback,
-            enhanced_error_callback,
-            enhanced_finished_callback,
-            *operation["args"],
-            **operation["kwargs"],
-        )
+        try:
+            self._execute_single_operation(
+                operation["callback"],
+                enhanced_result_callback,
+                enhanced_error_callback,
+                enhanced_finished_callback,
+                *operation["args"],
+                **operation["kwargs"],
+            )
+        except Exception as error:
+            logger.exception("Failed to start queued operation")
+            self._invoke_callback(
+                operation["error_callback"],
+                (type(error), error, traceback.format_exc()),
+                callback_name="error",
+            )
+            schedule_next_operation()
+
+    @staticmethod
+    def _invoke_callback(callback, *args, callback_name: str):
+        """Log and suppress UI callback errors so worker cleanup can continue."""
+        if not callback:
+            return
+        try:
+            callback(*args)
+        except Exception:
+            logger.exception("Task %s callback raised an exception", callback_name)
 
     def _execute_single_operation(
         self,
@@ -103,18 +138,32 @@ class TaskRunnerController:
         if result_callback:
             worker.signals.result.connect(
                 lambda result: QtCore.QTimer.singleShot(
-                    0, self.main, lambda: result_callback(result)
+                    0,
+                    self.main,
+                    lambda: self._invoke_callback(
+                        result_callback, result, callback_name="result"
+                    ),
                 )
             )
         if error_callback:
             worker.signals.error.connect(
                 lambda error: QtCore.QTimer.singleShot(
-                    0, self.main, lambda: error_callback(error)
+                    0,
+                    self.main,
+                    lambda: self._invoke_callback(
+                        error_callback, error, callback_name="error"
+                    ),
                 )
             )
         if finished_callback:
             worker.signals.finished.connect(
-                lambda: QtCore.QTimer.singleShot(0, self.main, finished_callback)
+                lambda: QtCore.QTimer.singleShot(
+                    0,
+                    self.main,
+                    lambda: self._invoke_callback(
+                        finished_callback, callback_name="finished"
+                    ),
+                )
             )
 
         self.main.current_worker = worker
@@ -153,7 +202,6 @@ class TaskRunnerController:
             )
 
         self.clear_operation_queue()
-        self.is_processing_queue = False
 
     def run_finish_only(
         self, finished_callback: Callable, error_callback: Callable = None
